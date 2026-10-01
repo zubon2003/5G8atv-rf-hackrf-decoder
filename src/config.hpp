@@ -18,10 +18,12 @@ struct Config {
     int vga_gain = 20;         // 0-62, step 2
     bool amp = true;           // +14 dB RF preamp; FPV signals are weak
                                // (--no-amp or the b key to disable)
-    bool gain_auto = true;     // auto LNA/VGA from ADC peak + clip stats;
-                               // manual via --gain manual, explicit
-                               // --lna/--vga, or the l/g keys. The RF amp
-                               // is never auto-switched (intermod risk).
+    // RF gain control. Auto: LNA/VGA from the ADC peak every 500 ms.
+    // Fast: C5VRX-style, from the |IQ| distribution of every USB transfer
+    // (src/dsp/gain_ctl.hpp). Manual: --gain manual, explicit --lna/--vga,
+    // or the l/g keys. The RF amp is never auto-switched (intermod risk).
+    enum class GainMode { Manual, Auto, Fast };
+    GainMode gain_mode = GainMode::Auto;
 
     enum class Input { HackRF, File };
     Input input = Input::HackRF;

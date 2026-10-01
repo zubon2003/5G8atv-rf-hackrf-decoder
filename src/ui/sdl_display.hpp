@@ -18,7 +18,9 @@ struct OsdStats {
     uint64_t frames = 0;
     int lna = 0, vga = 0;
     bool amp = false;
-    bool gain_auto = true;
+    const char* gain_mode = "AUTO";  // AUTO / FAST / MAN
+    int fast_writes = -1;            // FAST only: gain writes so far
+    float fast_healthy_pct = 0.0f;   // FAST only: windows in the healthy band
     bool clipping = false;  // ADC clipped within the last ~second
     double freq_mhz = 0.0;      // video carrier
     std::string channel;        // nearest FPV channel name e.g. "F4"; "" = ---
@@ -48,7 +50,7 @@ enum class KeyAction {
     FreqDownBig, // down arrow: -1 MHz
     ToggleCrt,
     ToggleRecord,
-    ToggleGainMode,  // a: auto <-> manual gain
+    ToggleGainMode,  // a: gain AUTO -> FAST -> MANUAL
     ToggleAmp,       // b: RF amp (+14 dB) on/off
     ToggleOsd,       // o: all OSD overlays on/off
     ForceResync,     // space: drop a stuck lock and re-acquire

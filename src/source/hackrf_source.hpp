@@ -1,11 +1,13 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
 #include <string>
 
 #include <libhackrf/hackrf.h>
 
 #include "../config.hpp"
+#include "../dsp/gain_ctl.hpp"
 #include "../dsp/ring_buffer.hpp"
 #include "sample_source.hpp"
 
@@ -42,6 +44,19 @@ public:
     // Fed by the same strided scan as the clip counter, for the gain AGC.
     int take_peak() { return peak_.exchange(0, std::memory_order_relaxed); }
 
+    // |IQ| statistics of the most recent USB transfer, for the fast gain
+    // control. Returns false when nothing newer than `after_seq` arrived.
+    bool latest_stats(uint64_t after_seq, IqStats* out) {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        if (stats_.seq <= after_seq) return false;
+        *out = stats_;
+        return true;
+    }
+    // Number of USB transfers received so far (IqStats::seq of the newest).
+    uint64_t transfer_seq() const {
+        return transfer_seq_.load(std::memory_order_relaxed);
+    }
+
     const std::string& error() const { return error_; }
 
 private:
@@ -54,6 +69,9 @@ private:
     std::atomic<uint64_t> total_{0};
     std::atomic<uint64_t> clipped_{0};
     std::atomic<int> peak_{0};
+    std::atomic<uint64_t> transfer_seq_{0};
+    std::mutex stats_mu_;
+    IqStats stats_;
     std::atomic<bool> running_{false};
     int lna_, vga_;
     std::string error_;

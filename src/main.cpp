@@ -30,6 +30,14 @@ using namespace famidec;
 
 namespace {
 
+const char* gain_mode_name(Config::GainMode m) {
+    switch (m) {
+        case Config::GainMode::Auto: return "AUTO";
+        case Config::GainMode::Fast: return "FAST";
+        default: return "MAN";
+    }
+}
+
 void usage() {
     std::printf(
         "fpvdec - 5.8 GHz analog FPV (FM-ATV, NTSC) HackRF One decoder\n\n"
@@ -49,7 +57,9 @@ void usage() {
         "                        8e6 keeps coarse color, <=7e6 grayscale,\n"
         "                        ~6e6 practical minimum (use whole MHz)\n"
         "  --offset HZ           tuning offset above carrier (default 0)\n"
-        "  --gain auto|manual    RF gain control (default auto)\n"
+        "  --gain auto|fast|manual  RF gain control (default auto). fast =\n"
+        "                        C5VRX-style: |IQ| percentiles every USB\n"
+        "                        transfer, one predictive jump, hold in band\n"
         "  --lna N --vga N       gain settings (imply --gain manual)\n"
         "  --no-amp              disable the +14 dB RF preamp (default on)\n"
         "  --mode color|gray     decode mode (default color)\n"
@@ -62,7 +72,7 @@ void usage() {
         "  --dump-frames PREFIX  write decoded frames as PPM (headless)\n"
         "  --frames N            number of frames for --dump-frames (default 30)\n"
         "  --spectrum            print PSD and exit (no video)\n"
-        "\nkeys: q/ESC quit, a gain auto/manual, l/L LNA, g/G VGA, b RF amp,\n"
+        "\nkeys: q/ESC quit, a gain auto/fast/manual, l/L LNA, g/G VGA, b RF amp,\n"
         "      c color, o OSD on/off, s screenshot, h help,\n"
         "      arrows tune (50 kHz / 1 MHz), r CRT mode, v record IQ,\n"
         "      f freerun raster, space resync\n");
@@ -96,15 +106,16 @@ bool parse_args(int argc, char** argv, Config* cfg) {
         else if (a == "--loop") cfg->loop = true;
         else if (a == "--rate") cfg->sample_rate = std::atof(next("--rate"));
         else if (a == "--offset") cfg->offset_hz = std::atof(next("--offset"));
-        else if (a == "--lna") { cfg->lna_gain = std::atoi(next("--lna")); cfg->gain_auto = false; }
-        else if (a == "--vga") { cfg->vga_gain = std::atoi(next("--vga")); cfg->gain_auto = false; }
+        else if (a == "--lna") { cfg->lna_gain = std::atoi(next("--lna")); cfg->gain_mode = Config::GainMode::Manual; }
+        else if (a == "--vga") { cfg->vga_gain = std::atoi(next("--vga")); cfg->gain_mode = Config::GainMode::Manual; }
         else if (a == "--amp") cfg->amp = true;
         else if (a == "--no-amp") cfg->amp = false;
         else if (a == "--gain") {
             std::string v = next("--gain");
-            if (v == "auto") cfg->gain_auto = true;
-            else if (v == "manual") cfg->gain_auto = false;
-            else { std::fprintf(stderr, "gain must be auto|manual\n"); return false; }
+            if (v == "auto") cfg->gain_mode = Config::GainMode::Auto;
+            else if (v == "fast" || v == "c5") cfg->gain_mode = Config::GainMode::Fast;
+            else if (v == "manual") cfg->gain_mode = Config::GainMode::Manual;
+            else { std::fprintf(stderr, "gain must be auto|fast|manual\n"); return false; }
         }
         else if (a == "--mode") {
             std::string v = next("--mode");
@@ -438,6 +449,8 @@ int main(int argc, char** argv) {
         uint64_t last_clip_count = 0;
         // Nearest FPV channel name (real VTX drift a few hundred kHz).
         std::string channel = fpv_nearest_channel(cfg.video_carrier_hz);
+        FastGainController fast_gain;
+        uint64_t fast_seq = 0;
         while (g_running.load(std::memory_order_relaxed)) {
             KeyAction act = disp.poll();
             if (act == KeyAction::Quit) break;
@@ -445,7 +458,7 @@ int main(int argc, char** argv) {
                 // Any manual gain key also drops out of auto mode.
                 if (act == KeyAction::GainLnaUp || act == KeyAction::GainLnaDown ||
                     act == KeyAction::GainVgaUp || act == KeyAction::GainVgaDown)
-                    mcfg.gain_auto = false;
+                    mcfg.gain_mode = Config::GainMode::Manual;
                 if (act == KeyAction::GainLnaUp) hackrf->set_gains(hackrf->lna() + 8, hackrf->vga());
                 if (act == KeyAction::GainLnaDown) hackrf->set_gains(hackrf->lna() - 8, hackrf->vga());
                 if (act == KeyAction::GainVgaUp) hackrf->set_gains(hackrf->lna(), hackrf->vga() + 2);
@@ -455,7 +468,17 @@ int main(int argc, char** argv) {
                     hackrf->set_amp(mcfg.amp);
                 }
             }
-            if (act == KeyAction::ToggleGainMode) mcfg.gain_auto = !mcfg.gain_auto;
+            if (act == KeyAction::ToggleGainMode) {
+                // a: AUTO -> FAST -> MANUAL -> AUTO
+                mcfg.gain_mode =
+                    mcfg.gain_mode == Config::GainMode::Auto   ? Config::GainMode::Fast
+                    : mcfg.gain_mode == Config::GainMode::Fast ? Config::GainMode::Manual
+                                                               : Config::GainMode::Auto;
+                fast_gain = FastGainController();
+                fast_seq = hackrf ? hackrf->transfer_seq() : 0;
+                std::printf("gain: %s\n", gain_mode_name(mcfg.gain_mode));
+                std::fflush(stdout);
+            }
             if (act == KeyAction::ToggleHelp) show_help = !show_help;
             if (act == KeyAction::ToggleOsd) show_osd = !show_osd;
             if (act == KeyAction::ToggleRecord) {
@@ -517,7 +540,15 @@ int main(int argc, char** argv) {
             st.frames = dec.stats().frames.load();
             if (hackrf) { st.lna = hackrf->lna(); st.vga = hackrf->vga(); }
             st.amp = mcfg.amp;
-            st.gain_auto = mcfg.gain_auto;
+            st.gain_mode = gain_mode_name(mcfg.gain_mode);
+            if (mcfg.gain_mode == Config::GainMode::Fast) {
+                st.fast_writes = static_cast<int>(fast_gain.writes());
+                st.fast_healthy_pct =
+                    fast_gain.windows()
+                        ? 100.0f * static_cast<float>(fast_gain.healthy()) /
+                              static_cast<float>(fast_gain.windows())
+                        : 0.0f;
+            }
             // V-SYNC considered locked while real frames keep arriving.
             auto now = std::chrono::steady_clock::now();
             if (st.clipped > last_clip_count) {
@@ -530,7 +561,26 @@ int main(int argc, char** argv) {
             // flag here double-penalizes one event into a -12 dB sawtooth).
             // Down fast when hot, up slowly when weak; VGA first, LNA at
             // the ends. The RF amp is never auto-switched (intermod risk).
-            if (mcfg.gain_auto && hackrf &&
+            // Fast (C5VRX-style) gain: one decision per new USB transfer;
+            // this loop runs every frame (~16 ms), transfers are ~13 ms.
+            if (mcfg.gain_mode == Config::GainMode::Fast && hackrf) {
+                IqStats s;
+                if (hackrf->latest_stats(fast_seq, &s)) {
+                    fast_seq = s.seq;
+                    double t = std::chrono::duration<double>(now - fps_start).count();
+                    GainSetting cur{hackrf->lna(), hackrf->vga()}, next;
+                    if (fast_gain.update(s, t, cur, &next)) {
+                        hackrf->set_gains(next.lna, next.vga);
+                        fast_gain.written(hackrf->transfer_seq());
+                        std::printf("FAST AGC: %s p50 %d p95 %d clip %.4f coh %.2f"
+                                    " -> LNA%d VGA%d\n",
+                                    fast_gain.reason(), s.p50, s.p95, s.clip_frac,
+                                    s.coherence, hackrf->lna(), hackrf->vga());
+                        std::fflush(stdout);
+                    }
+                }
+            }
+            if (mcfg.gain_mode == Config::GainMode::Auto && hackrf &&
                 now - last_agc >= std::chrono::milliseconds(500)) {
                 last_agc = now;
                 int peak = hackrf->take_peak();

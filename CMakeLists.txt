@@ -78,3 +78,7 @@ add_test(NAME synth_fm COMMAND synth_fm)
 
 add_executable(analyze_rec tests/analyze_rec.cpp)
 target_link_libraries(analyze_rec PRIVATE fpv_dsp)
+
+add_executable(test_gain_ctl tests/test_gain_ctl.cpp)
+target_link_libraries(test_gain_ctl PRIVATE fpv_dsp)
+add_test(NAME gain_ctl COMMAND test_gain_ctl)

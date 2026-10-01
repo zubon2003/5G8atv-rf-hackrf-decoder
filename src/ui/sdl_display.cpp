@@ -279,9 +279,12 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
         if (n < static_cast<int>(sizeof(line)))
             n += std::snprintf(line + n, sizeof(line) - n,
                                " %.0fMS %s L%d V%d%s",
-                               stats.video_latency_ms,
-                               stats.gain_auto ? "AUTO" : "MAN", stats.lna,
-                               stats.vga, stats.amp ? " AMP" : "");
+                               stats.video_latency_ms, stats.gain_mode,
+                               stats.lna, stats.vga, stats.amp ? " AMP" : "");
+        // FAST gain: writes so far and the share of windows in the band.
+        if (stats.fast_writes >= 0 && n < static_cast<int>(sizeof(line)))
+            n += std::snprintf(line + n, sizeof(line) - n, " W%d %.0f%%",
+                               stats.fast_writes, stats.fast_healthy_pct);
         std::string t(line);
         int x = (Frame::kWidth - static_cast<int>(t.size()) * kCharW) / 2;
         if (x < 4) x = 4;
@@ -310,7 +313,7 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
         static const char* kHelp[] = {
             "KEYS",
             "Q ESC   QUIT",
-            "A       GAIN AUTO - MANUAL",
+            "A       GAIN AUTO - FAST - MANUAL",
             "L       LNA UP   (MANUAL)",
             "SHIFT L LNA DOWN (MANUAL)",
             "G       VGA UP   (MANUAL)",

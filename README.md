@@ -95,7 +95,7 @@ cmake --build build -j
 | `--dev HZ` | FM peak deviation (default 5e6) |
 | `--invert` | flip discriminator polarity (non-standard VTX) |
 | `--no-afc` | disable automatic frequency centering |
-| `--gain auto\|manual` | RF gain control (default auto) |
+| `--gain auto\|fast\|manual` | RF gain control (default auto). `fast` is the experimental C5VRX-style controller, see below |
 | `--lna N` / `--vga N` | fixed gains, imply `--gain manual` |
 | `--no-amp` | disable the +14 dB RF preamp (default on) |
 | `--rate HZ` | sample rate (default 10e6; 8e6 keeps coarse color, ≤7e6 grayscale, ~6e6 minimum) |
@@ -110,14 +110,37 @@ cmake --build build -j
 
 ### Keys / on-screen display
 
-- `q` / ESC quit, `a` gain auto/manual, `l`/`L` LNA, `g`/`G` VGA,
+- `q` / ESC quit, `a` gain auto/fast/manual, `l`/`L` LNA, `g`/`G` VGA,
   `b` RF amp, `c` color/gray, `o` OSD on/off, `s` screenshot, `h` help
 - `←`/`→` tune ±50 kHz, `↑`/`↓` ±1 MHz, `r` CRT emulation,
   `v` IQ record start/stop (10 MSPS ≈ 20 MB/s — keep clips short)
 - **Top left (big green)**: nearest FPV channel name (`F4`)
 - **Top line (yellow)**: `V:OK H:OK 59.94FPS 5800.39 F4 45MS AUTO L40 V20 AMP`
   — sync locks, decoded field rate, AFC-tracked VTX frequency, latency,
-  gain state; a red `CLIP` appears on ADC clipping
+  gain state; a red `CLIP` appears on ADC clipping. In `FAST` gain mode the
+  line ends with `W<n> <p>%`: gain writes so far and the share of USB
+  transfers whose median |IQ| sat in the healthy band
+
+### Fast gain (`--gain fast`, experimental)
+
+A test port of the gain control in [C5VRX](https://github.com/Twotoz/C5VRX)
+(Direct Gain V3-V5), the ESP32-C5 FPV receiver, to compare against the
+default peak AGC (`src/dsp/gain_ctl.hpp`, unit tests in
+`tests/test_gain_ctl.cpp`):
+
+| | `auto` (default) | `fast` |
+|---|---|---|
+| Measures | ADC peak | P50/P95 of \|IQ\|, rail fraction, lag-1 carrier coherence |
+| Cadence | 500 ms | every USB transfer (~13 ms at 10 MSPS) |
+| In range | hold | zero-write hold while P50 is 24-48 |
+| Out of range | VGA ±2 dB (or LNA ±8 dB) per step | one predictive jump to P50 = 34 |
+| Overload | −6 / −12 dB | emergency drop, never damped |
+| No carrier | ramps up | listens at high gain; noise never pulls it down |
+| Anti-hunt | — | two quick reversals → 4 consecutive windows needed for 1.5 s |
+
+Writes are logged as `FAST AGC: ...`. Thresholds are first guesses for 8-bit
+samples; the carrier-coherence threshold in particular needs checking on
+real hardware.
 
 ## How it works
 

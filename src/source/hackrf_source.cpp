@@ -31,6 +31,14 @@ int HackRfSource::rx_callback(hackrf_transfer* transfer) {
         if (v >= 127) ++clips;
     }
     if (clips) self->clipped_.fetch_add(clips, std::memory_order_relaxed);
+    // Amplitude distribution + carrier coherence for the fast gain control
+    // (every 4th sample: ~33k probes per 256 KiB transfer).
+    {
+        IqStats st = compute_iq_stats(data, len, 4);
+        st.seq = self->transfer_seq_.fetch_add(1, std::memory_order_relaxed) + 1;
+        std::lock_guard<std::mutex> lk(self->stats_mu_);
+        self->stats_ = st;
+    }
     int cur = self->peak_.load(std::memory_order_relaxed);
     while (mx > cur &&
            !self->peak_.compare_exchange_weak(cur, mx,
