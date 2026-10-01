@@ -37,6 +37,10 @@ struct Config {
                                     // for non-standard VTX
     bool afc = true;                // auto re-tune onto the VTX center
                                     // (--no-afc to disable)
+    bool freerun_display = false;   // when unlocked, draw the composite on a
+                                    // fixed nominal H/V raster (rolls but
+                                    // shows a present signal) instead of
+                                    // per-line snow. --freerun or the f key.
     double video_lpf_hz = 0.0;      // post-detector real LPF, 0 = off.
                                     // At 10 MSPS the FM audio subcarrier is
                                     // outside Nyquist, so this is purely an

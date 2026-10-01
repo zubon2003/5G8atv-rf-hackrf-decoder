@@ -39,6 +39,7 @@ public:
         // correct across input drops).
         std::atomic<uint64_t> frame_sample_pos{0};
         std::atomic<uint64_t> samples_in{0};
+        std::atomic<bool> agc_seeded{false};  // false = AGC re-bootstrapping
     };
 
     NtscDecoder(const Config& cfg, TripleBuffer& out);
@@ -56,13 +57,25 @@ public:
         }
     }
 
+    // Force a clean re-acquisition (equivalent to a freshly constructed
+    // decoder): drops a false lock the runtime cannot otherwise escape. On a
+    // faded/lost signal the flywheel can stay "locked" onto a wrong line
+    // phase and never fall back to Search, so the picture tears until the
+    // process is restarted; this gives the same recovery without a restart.
+    // Thread-safe: applied on the DSP thread at the next process().
+    void request_reset() {
+        pending_reset_.store(true, std::memory_order_relaxed);
+    }
+
     const Stats& stats() const { return stats_; }
 
 private:
     enum class State { Search, Track };
 
     void decode_lines();
+    void reset_state();
     void freerun_line(int64_t start);
+    void raster_line(int64_t start);
     bool find_hsync_edge(double lo, double hi, double* edge_out,
                          int64_t* pulse_begin = nullptr,
                          int64_t* pulse_end = nullptr) const;
@@ -121,12 +134,43 @@ private:
     std::vector<float> uv_taps_;
     int uv_delay_;
 
-    // Search state
+    // Search state. Acquire a lock only after a short run of consecutive
+    // line-spaced edges, and seed the flywheel period from their average: a
+    // single line's interval is too noisy and can seed a wrong period that
+    // then tears the picture.
+    static constexpr int kAcquireEdges = 3;  // consecutive intervals required
+    int acquire_edges_ = kAcquireEdges;      // FPVDEC_ACQ_EDGES overrides
     double search_prev_edge_ = -1.0;
+    int search_good_ = 0;
+    double search_interval_sum_ = 0.0;
+    // Re-bootstrap the AGC after this many Search lines without a lock. A
+    // level shift (e.g. a fade or an AFC re-tune) can leave the AGC seed
+    // mis-scaled so the sync slicer never fires; the consecutive-miss reset
+    // is defeated by the occasional spurious edge, so key off elapsed Search
+    // lines instead. ~4 fields at the NTSC line rate.
+    static constexpr int kSearchReseed = 1100;
+    bool reseed_ = true;  // FPVDEC_NO_RESEED=1 disables (debug/compare)
+    int search_lines_ = 0;
     int64_t cursor_ = 0;
     int freerun_row_ = 0;  // "snow" rows painted while unlocked
+    // Fixed-raster (--freerun) vertical flywheel: a long-period (one field
+    // ~= 262 lines) analogue of the horizontal LinePll. The frame boundary
+    // snaps to a detected vsync block only when it lands near the expected
+    // field length, and free-wheels at the nominal length otherwise, so the
+    // picture holds vertically instead of rolling.
+    static constexpr int kVFieldMin = 220;  // reject a vsync earlier than this
+    static constexpr int kVFieldMax = 280;  // coast-wrap if vsync is missed
+    int raster_line_no_ = 0;    // lines since the last field boundary
+    int raster_vsync_run_ = 0;  // consecutive vsync-asserted lines
+    bool vfly_ = true;  // FPVDEC_NO_VFLY=1 disables the flywheel (debug)
+    // Horizontal phase predictor for the raster: advances one nominal line
+    // each row and snaps to the actual hsync when found (period stays
+    // nominal, so no skew), holding the picture horizontally.
+    double raster_h_pos_ = 0.0;
+    bool raster_h_found_ = false;
     int search_misses_ = 0;  // consecutive lines with no sync found
     std::atomic<float> pending_shift_{0.0f};
+    std::atomic<bool> pending_reset_{false};  // force a clean re-acquisition
 
     // Extent of the most recently found hsync pulse (slicer-asserted range).
     int64_t pulse_begin_ = 0;
@@ -136,6 +180,21 @@ private:
     int vsync_run_ = 0;
     int line_no_ = 0;
     uint64_t frame_seq_ = 0;
+
+    // False-lock watchdog. A lock the flywheel cannot actually track (wrong
+    // line period) keeps failing the narrow hsync window and leaning on the
+    // wide-search rescue, which re-anchors the phase but leaves the period
+    // wrong and resets the coast counter — so it never drops to Search on
+    // its own and the picture tears until a restart. Counting narrow-window
+    // misses per ~field catches this: a healthy lock misses only the
+    // vertical-blanking lines, a false lock misses most of them.
+    static constexpr int kFalseLockField = 262;   // lines per evaluation
+    static constexpr int kFalseLockMisses = 105;   // ~40% of a field
+    static constexpr int kFalseLockFields = 3;     // sustained this many
+    int track_line_ctr_ = 0;
+    int narrow_miss_ctr_ = 0;
+    int bad_field_run_ = 0;
+    bool watchdog_ = true;  // FPVDEC_NO_WATCHDOG=1 disables (debug/compare)
 
     // Per-line scratch
     std::vector<float> su_, sv_, suf_, svf_;

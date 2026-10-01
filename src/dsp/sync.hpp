@@ -49,9 +49,27 @@ struct LinePll {
     }
 
     void acquire(double edge_pos, double measured_period) {
-        period = measured_period;
+        // Only seed a period the tracker can actually hold: Search accepts a
+        // wider interval than kPullRange, and a period outside the pull range
+        // is clamped to the rail on the first correction, which leaves a
+        // permanent residual phase slip (a diagonally torn picture).
+        double lo = nominal * (1.0 - kPullRange);
+        double hi = nominal * (1.0 + kPullRange);
+        period = measured_period < lo ? lo
+                 : measured_period > hi ? hi
+                                        : measured_period;
         next_edge = edge_pos + period;
         coast = 0;
+    }
+
+    // Drop any lock and return to the nominal period. Used to force a clean
+    // re-acquisition when a stale false lock has to be abandoned.
+    void reset() {
+        period = nominal;
+        next_edge = 0.0;
+        locked = false;
+        coast = 0;
+        good = 0;
     }
 };
 

@@ -51,6 +51,8 @@ enum class KeyAction {
     ToggleGainMode,  // a: auto <-> manual gain
     ToggleAmp,       // b: RF amp (+14 dB) on/off
     ToggleOsd,       // o: all OSD overlays on/off
+    ForceResync,     // space: drop a stuck lock and re-acquire
+    ToggleFreerun,   // f: fixed-raster display while unlocked
 };
 
 class SdlDisplay {

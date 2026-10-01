@@ -55,6 +55,8 @@ void usage() {
         "  --mode color|gray     decode mode (default color)\n"
         "  --sat F --hue DEG     color trims\n"
         "  --overscan F          horizontal crop per side 0..0.15 (default 0)\n"
+        "  --freerun             when unlocked, draw a fixed H/V raster of the\n"
+        "                        signal (rolls) instead of snow (or the f key)\n"
         "  --record PATH         tee raw IQ to .cs8 while decoding\n"
         "  --dump-composite PATH write post-AGC composite as f32\n"
         "  --dump-frames PREFIX  write decoded frames as PPM (headless)\n"
@@ -62,7 +64,8 @@ void usage() {
         "  --spectrum            print PSD and exit (no video)\n"
         "\nkeys: q/ESC quit, a gain auto/manual, l/L LNA, g/G VGA, b RF amp,\n"
         "      c color, o OSD on/off, s screenshot, h help,\n"
-        "      arrows tune (50 kHz / 1 MHz), r CRT mode, v record IQ\n");
+        "      arrows tune (50 kHz / 1 MHz), r CRT mode, v record IQ,\n"
+        "      f freerun raster, space resync\n");
 }
 
 bool parse_args(int argc, char** argv, Config* cfg) {
@@ -109,6 +112,7 @@ bool parse_args(int argc, char** argv, Config* cfg) {
         } else if (a == "--dev") cfg->fm_dev_hz = std::atof(next("--dev"));
         else if (a == "--invert") cfg->invert = true;
         else if (a == "--no-afc") cfg->afc = false;
+        else if (a == "--freerun") cfg->freerun_display = true;
         else if (a == "--lpf") cfg->video_lpf_hz = std::atof(next("--lpf"));
         else if (a == "--overscan") cfg->overscan = std::atof(next("--overscan"));
         else if (a == "--sat") cfg->saturation = std::atof(next("--sat"));
@@ -467,6 +471,17 @@ int main(int argc, char** argv) {
                 std::fflush(stdout);
             }
             if (act == KeyAction::ToggleCrt) crt_mode = !crt_mode;
+            if (act == KeyAction::ForceResync) {
+                dec.request_reset();
+                std::printf("resync: dropped lock, re-acquiring\n");
+                std::fflush(stdout);
+            }
+            if (act == KeyAction::ToggleFreerun) {
+                mcfg.freerun_display = !mcfg.freerun_display;
+                std::printf("freerun raster: %s\n",
+                            mcfg.freerun_display ? "on" : "off");
+                std::fflush(stdout);
+            }
             // Arrow-key tuning: left/right 50 kHz, up/down 1 MHz.
             double tune = 0.0;
             if (act == KeyAction::FreqUp) tune = 50e3;

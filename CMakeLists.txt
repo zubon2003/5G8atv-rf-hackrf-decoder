@@ -59,12 +59,15 @@ if(WIN32)
                 $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:fpvdec>)
     if(HACKRF_LIBRARY)
         get_filename_component(_hackrf_lib_dir "${HACKRF_LIBRARY}" DIRECTORY)
-        if(EXISTS "${_hackrf_lib_dir}/../bin/hackrf.dll")
-            add_custom_command(TARGET fpvdec POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                        "${_hackrf_lib_dir}/../bin/hackrf.dll"
-                        $<TARGET_FILE_DIR:fpvdec>)
-        endif()
+        # hackrf.dll pulls in libusb and pthreads from the same bin dir.
+        foreach(_dll hackrf.dll libusb-1.0.dll pthreadVC2.dll)
+            if(EXISTS "${_hackrf_lib_dir}/../bin/${_dll}")
+                add_custom_command(TARGET fpvdec POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${_hackrf_lib_dir}/../bin/${_dll}"
+                            $<TARGET_FILE_DIR:fpvdec>)
+            endif()
+        endforeach()
     endif()
 endif()
 
@@ -72,3 +75,6 @@ enable_testing()
 add_executable(synth_fm tests/synth_fm.cpp)
 target_link_libraries(synth_fm PRIVATE fpv_dsp)
 add_test(NAME synth_fm COMMAND synth_fm)
+
+add_executable(analyze_rec tests/analyze_rec.cpp)
+target_link_libraries(analyze_rec PRIVATE fpv_dsp)

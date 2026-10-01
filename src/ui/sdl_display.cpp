@@ -231,6 +231,10 @@ KeyAction SdlDisplay::poll() {
                     return KeyAction::ToggleAmp;
                 case SDLK_o:
                     return KeyAction::ToggleOsd;
+                case SDLK_SPACE:
+                    return KeyAction::ForceResync;
+                case SDLK_f:
+                    return KeyAction::ToggleFreerun;
                 default:
                     break;
             }
@@ -320,6 +324,8 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
             "UP DOWN     TUNE 1MHZ",
             "R       CRT MODE",
             "V       RECORD IQ START-STOP",
+            "SPACE   RESYNC (STUCK LOCK)",
+            "F       FREERUN RASTER ON-OFF",
         };
         const int n = static_cast<int>(sizeof(kHelp) / sizeof(kHelp[0]));
         int bw = 23 * kCharW + 32;

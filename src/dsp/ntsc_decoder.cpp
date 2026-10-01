@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 #include "chroma.hpp"
 
@@ -36,6 +37,11 @@ NtscDecoder::NtscDecoder(const Config& cfg, TripleBuffer& out)
       sync_lpf_(design_lowpass(1.0e6, cfg.sample_rate, 31)),
       uv_taps_(design_lowpass(0.6e6, cfg.sample_rate, 31)) {
     pll_.init(nominal_period_);
+    watchdog_ = std::getenv("FPVDEC_NO_WATCHDOG") == nullptr;
+    if (const char* e = std::getenv("FPVDEC_ACQ_EDGES"))
+        acquire_edges_ = std::max(1, std::atoi(e));
+    reseed_ = std::getenv("FPVDEC_NO_RESEED") == nullptr;
+    vfly_ = std::getenv("FPVDEC_NO_VFLY") == nullptr;
     chroma_delay_ = static_cast<int64_t>(chroma_bpf_.delay());
     sync_delay_ = static_cast<int64_t>(sync_lpf_.delay());
     uv_delay_ = static_cast<int>((uv_taps_.size() - 1) / 2);
@@ -64,6 +70,9 @@ float NtscDecoder::chroma_frac(double abs) const {
 }
 
 void NtscDecoder::process(const float* raw, size_t n) {
+    // A forced re-acquisition (user "resync") takes effect here, on the DSP
+    // thread, before any decoding of this block.
+    if (pending_reset_.exchange(false, std::memory_order_relaxed)) reset_state();
     // Apply any feed-forward level shift (AFC re-tune) before decoding.
     float shift = pending_shift_.exchange(0.0f, std::memory_order_relaxed);
     if (shift != 0.0f) agc_.shift(shift);
@@ -94,6 +103,7 @@ void NtscDecoder::process(const float* raw, size_t n) {
 
     stats_.samples_in.store(static_cast<uint64_t>(comp_end()),
                             std::memory_order_relaxed);
+    stats_.agc_seeded.store(agc_.seeded(), std::memory_order_relaxed);
     if (agc_.seeded()) decode_lines();
     stats_.agc_tip_raw.store(agc_.tip(), std::memory_order_relaxed);
     stats_.agc_blank_raw.store(agc_.blank(), std::memory_order_relaxed);
@@ -168,6 +178,76 @@ void NtscDecoder::decode_lines() {
             if (cursor_ + static_cast<int64_t>(2 * nominal_period_) + margin >=
                 comp_end())
                 return;
+            // Search has run too long without acquiring: the AGC seed is
+            // probably stale (mis-scaled sync slicer). Re-bootstrap so a
+            // present-but-unlocked signal gets a fresh chance.
+            if (reseed_ && ++search_lines_ > kSearchReseed) {
+                search_lines_ = 0;
+                search_misses_ = 0;
+                search_good_ = 0;
+                search_interval_sum_ = 0.0;
+                search_prev_edge_ = -1.0;
+                agc_.reset();
+                return;
+            }
+            // Fixed-raster fallback: draw every line at a horizontally
+            // phase-snapped position (period fixed at nominal, so no skew or
+            // roll), while still probing for a real lock to hand off to the
+            // colour decode.
+            if (cfg_.freerun_display) {
+                if (raster_h_pos_ < static_cast<double>(base_ + 1) ||
+                    raster_h_pos_ >
+                        static_cast<double>(cursor_) + 4.0 * nominal_period_)
+                    raster_h_pos_ = static_cast<double>(cursor_);
+                // Narrow window while tracking, half-line while re-acquiring.
+                double win = raster_h_found_ ? 2.0 * samples_per_us_
+                                             : 0.5 * nominal_period_;
+                double edge;
+                bool found = find_hsync_edge(raster_h_pos_ - win,
+                                             raster_h_pos_ + win, &edge);
+                int64_t draw_start;
+                if (found) {
+                    raster_h_pos_ = edge;  // snap phase; period stays nominal
+                    draw_start = static_cast<int64_t>(edge);
+                    raster_h_found_ = true;
+                    search_misses_ = 0;
+                    // Consecutive line-spaced edges promote to a real lock.
+                    if (search_prev_edge_ >= 0.0) {
+                        double interval = edge - search_prev_edge_;
+                        if (std::abs(interval - nominal_period_) <
+                            0.02 * nominal_period_) {
+                            search_interval_sum_ += interval;
+                            if (++search_good_ >= acquire_edges_) {
+                                pll_.acquire(edge, search_interval_sum_ /
+                                                       search_good_);
+                                state_ = State::Track;
+                                search_prev_edge_ = -1.0;
+                                search_good_ = 0;
+                                search_interval_sum_ = 0.0;
+                                search_lines_ = 0;
+                                track_line_ctr_ = 0;
+                                narrow_miss_ctr_ = 0;
+                                bad_field_run_ = 0;
+                                continue;
+                            }
+                        } else {
+                            search_good_ = 0;
+                            search_interval_sum_ = 0.0;
+                        }
+                    }
+                    search_prev_edge_ = edge;
+                } else {
+                    draw_start = static_cast<int64_t>(raster_h_pos_);  // coast
+                    raster_h_found_ = false;
+                    search_good_ = 0;
+                    search_interval_sum_ = 0.0;
+                    search_prev_edge_ = -1.0;
+                }
+                raster_line(draw_start);
+                raster_h_pos_ += nominal_period_;
+                cursor_ = static_cast<int64_t>(raster_h_pos_);
+                continue;
+            }
             double edge;
             if (!find_hsync_edge(static_cast<double>(cursor_),
                                  static_cast<double>(cursor_) + nominal_period_,
@@ -182,6 +262,11 @@ void NtscDecoder::decode_lines() {
                     agc_.reset();
                     return;  // process() bootstraps until seeded again
                 }
+                // A missing edge breaks the consecutive run used to average
+                // the period seed.
+                search_good_ = 0;
+                search_interval_sum_ = 0.0;
+                search_prev_edge_ = -1.0;
                 freerun_line(cursor_);
                 cursor_ += static_cast<int64_t>(nominal_period_);
                 continue;
@@ -192,10 +277,28 @@ void NtscDecoder::decode_lines() {
                 double interval = edge - search_prev_edge_;
                 if (std::abs(interval - nominal_period_) <
                     0.02 * nominal_period_) {
-                    pll_.acquire(edge, interval);
-                    state_ = State::Track;
-                    search_prev_edge_ = -1.0;
-                    continue;
+                    // Consecutive line-spaced edge: accumulate toward an
+                    // averaged period before committing to a lock.
+                    search_interval_sum_ += interval;
+                    if (++search_good_ >= acquire_edges_) {
+                        double avg = search_interval_sum_ /
+                                     static_cast<double>(search_good_);
+                        pll_.acquire(edge, avg);
+                        state_ = State::Track;
+                        search_prev_edge_ = -1.0;
+                        search_good_ = 0;
+                        search_interval_sum_ = 0.0;
+                        search_lines_ = 0;
+                        track_line_ctr_ = 0;
+                        narrow_miss_ctr_ = 0;
+                        bad_field_run_ = 0;
+                        continue;
+                    }
+                } else {
+                    // Interval off by more than a line's worth: restart the
+                    // run from this edge.
+                    search_good_ = 0;
+                    search_interval_sum_ = 0.0;
                 }
             }
             search_prev_edge_ = edge;
@@ -206,9 +309,11 @@ void NtscDecoder::decode_lines() {
                 comp_end())
                 return;
             double measured;
-            bool ok = find_hsync_edge(predicted - 2 * samples_per_us_,
-                                      predicted + 2 * samples_per_us_,
-                                      &measured, &pulse_begin_, &pulse_end_);
+            bool narrow_ok = find_hsync_edge(predicted - 2 * samples_per_us_,
+                                             predicted + 2 * samples_per_us_,
+                                             &measured, &pulse_begin_,
+                                             &pulse_end_);
+            bool ok = narrow_ok;
             double edge;
             if (!ok && pll_.coast >= 4 &&
                 find_hsync_edge(predicted - 0.5 * pll_.period,
@@ -237,12 +342,50 @@ void NtscDecoder::decode_lines() {
                 state_ = State::Search;
                 cursor_ = static_cast<int64_t>(edge);
                 search_prev_edge_ = -1.0;
+                search_lines_ = 0;
                 continue;
+            }
+            // False-lock watchdog: a lock leaning on the wide rescue keeps
+            // missing the narrow window. If that dominates a field for a few
+            // fields running, the period is wrong — force a re-acquisition.
+            if (!narrow_ok) ++narrow_miss_ctr_;
+            if (++track_line_ctr_ >= kFalseLockField) {
+                bool bad = narrow_miss_ctr_ > kFalseLockMisses;
+                bad_field_run_ = bad ? bad_field_run_ + 1 : 0;
+                track_line_ctr_ = 0;
+                narrow_miss_ctr_ = 0;
+                if (watchdog_ && bad_field_run_ >= kFalseLockFields) {
+                    std::fprintf(stderr,
+                                 "false-lock watchdog: forcing resync\n");
+                    reset_state();
+                    continue;
+                }
             }
             handle_line(edge, ok);
             stats_.lines.fetch_add(1, std::memory_order_relaxed);
         }
     }
+}
+
+// Abandon the current lock and AGC seed and start over from Search, as if
+// freshly constructed. The sample buffers are kept (re-searched from the
+// current position); the AGC re-bootstraps from the incoming signal.
+void NtscDecoder::reset_state() {
+    pll_.reset();
+    state_ = State::Search;
+    agc_.reset();
+    cursor_ = base_ + 1;
+    search_prev_edge_ = -1.0;
+    search_good_ = 0;
+    search_interval_sum_ = 0.0;
+    search_misses_ = 0;
+    search_lines_ = 0;
+    vsync_run_ = 0;
+    line_no_ = 0;
+    track_line_ctr_ = 0;
+    narrow_miss_ctr_ = 0;
+    bad_field_run_ = 0;
+    stats_.line_locked.store(false, std::memory_order_relaxed);
 }
 
 // Paint one unlocked line as grayscale snow, normalized per line so noise of
@@ -271,6 +414,67 @@ void NtscDecoder::freerun_line(int64_t start) {
     }
     if (++freerun_row_ >= Frame::kHeight / 2) {
         freerun_row_ = 0;
+        tb_.publish(++frame_seq_);
+    }
+}
+
+// Fixed-raster fallback (--freerun): draw the AGC-scaled composite as luma on
+// a nominal horizontal period, with a vertical flywheel (below) holding the
+// field boundary, all without a horizontal sync lock. A present-but-
+// unlockable signal shows up as a held picture instead of per-line snow; the
+// normal locked decode takes over the moment sync is acquired. Publishes a
+// field but leaves stats_.frames alone, so the OSD still honestly reports
+// "not locked".
+void NtscDecoder::raster_line(int64_t start) {
+    int active = raster_line_no_ - kActiveStartLine;
+    if (active >= 0 && active < kActiveLines) {
+        int row = active * 2;
+        if (row >= 0 && row + 1 < Frame::kHeight) {
+            Frame& f = tb_.back();
+            uint32_t* out0 =
+                f.rgba.data() + static_cast<size_t>(row) * Frame::kWidth;
+            uint32_t* out1 = out0 + Frame::kWidth;
+            const double a0 =
+                static_cast<double>(start) + 9.4 * samples_per_us_;
+            const double span = 52.6 * samples_per_us_;
+            const double step = span / Frame::kWidth;
+            for (int px = 0; px < Frame::kWidth; ++px) {
+                float y = ire_frac(a0 + px * step);
+                uint32_t g = static_cast<uint32_t>(
+                    std::clamp(y / 100.0f, 0.0f, 1.0f) * 255.0f + 0.5f);
+                uint32_t px32 = 0xff000000u | (g << 16) | (g << 8) | g;
+                out0[px] = px32;
+                out1[px] = px32;
+            }
+        }
+    }
+    // Vertical flywheel: a vsync block is a line with sync asserted most of
+    // its length. Anchor the field boundary to the end of that block, but
+    // only when it falls near the expected field length (rejects a spurious
+    // mid-field detection); free-wheel-wrap at the max length if vsync is
+    // missed. This is a one-field-period flywheel, so the field holds
+    // position instead of rolling.
+    if (!vfly_) {  // flywheel off: plain free-run wrap (rolls)
+        if (++raster_line_no_ >= 262) {
+            raster_line_no_ = 0;
+            tb_.publish(++frame_seq_);
+        }
+        return;
+    }
+    const int64_t period_i = static_cast<int64_t>(nominal_period_);
+    int64_t asserted = 0;
+    for (int64_t j = start; j < start + period_i; ++j)
+        if (ire_s(j) < kSyncSliceIre) ++asserted;
+    bool boundary = false;
+    if (asserted > static_cast<int64_t>(0.45 * static_cast<double>(period_i))) {
+        ++raster_vsync_run_;
+    } else {
+        if (raster_vsync_run_ >= 2 && raster_line_no_ >= kVFieldMin)
+            boundary = true;
+        raster_vsync_run_ = 0;
+    }
+    if (boundary || ++raster_line_no_ >= kVFieldMax) {
+        raster_line_no_ = 0;
         tb_.publish(++frame_seq_);
     }
 }
