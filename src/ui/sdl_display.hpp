@@ -50,7 +50,8 @@ enum class KeyAction {
     FreqDownBig, // down arrow: -1 MHz
     ToggleCrt,
     ToggleRecord,
-    ToggleGainMode,  // a: gain AUTO -> FAST -> MANUAL
+    ToggleGainMode,  // A (shift): gain AUTO -> FAST -> MANUAL
+    NextChannel,     // a: cycle E2 E1 F1 F3 F4 F5
     ToggleAmp,       // b: RF amp (+14 dB) on/off
     ToggleOsd,       // o: all OSD overlays on/off
     ForceResync,     // space: drop a stuck lock and re-acquire

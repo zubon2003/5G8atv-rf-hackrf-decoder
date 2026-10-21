@@ -109,7 +109,8 @@ cmake --build build -j
 
 ### キー操作 / OSD
 
-- `q`/ESC 終了、`a` ゲイン auto/fast/manual、`l`/`L` LNA、`g`/`G` VGA、
+- `q`/ESC 終了、`a` チャンネル切替(E2→E1→F1→F3→F4→F5)、`A`(Shift) ゲイン auto/fast/manual、
+  `l`/`L` LNA、`g`/`G` VGA、
   `b` RFアンプ、`c` カラー/モノクロ、`o` OSD 表示切替、`s` スクリーンショット、`h` ヘルプ
 - `←`/`→` ±50kHz、`↑`/`↓` ±1MHz チューニング、`r` CRT エミュレーション、
   `v` IQ 録画開始/停止(10MSPS ≈ 20MB/s なので短めに)
@@ -182,9 +183,20 @@ ctest --test-dir build -C Release
 
 ## ライセンス / 免責
 
-MIT License — [LICENSE](LICENSE) を参照。GOROman 氏の
-[famicom-rf-hackrf-decoder](https://github.com/GOROman/famicom-rf-hackrf-decoder)
-(MIT)がベースです。
+GPL-3.0-only — [LICENSE](LICENSE) を参照。
+
+- GOROman 氏の [famicom-rf-hackrf-decoder](https://github.com/GOROman/famicom-rf-hackrf-decoder)
+  がベースです。元のコードは MIT ライセンスで、その著作権表示と許諾文は
+  [LICENSES/MIT-famicom-rf-hackrf-decoder.txt](LICENSES/MIT-famicom-rf-hackrf-decoder.txt)
+  に残してあり、元のコードに由来する部分には引き続き適用されます。
+- 試験的な高速ゲイン制御(`--gain fast`、`src/dsp/gain_ctl.hpp`)と
+  C5VRX 受信系のエミュレーション(`--c5`)は、Twotoz 氏と C5VRX
+  コントリビューターによる [C5VRX](https://github.com/Twotoz/C5VRX)
+  (GPL-3.0-only)の Direct Gain V3〜V5 のゲイン制御と受信系の設計を
+  取り入れたものです。元のプロジェクトと Discord への招待は
+  [C5VRX 公式サイト](https://twotoz.github.io/C5VRX/) にあります。
+  本ソフトウェアは C5VRX の公式リリースではありません。
+- `third_party/SDL2` は独自のライセンス(zlib、`third_party/SDL2/LICENSE.txt`)のままです。
 
 受信専用ツールであり、HackRF One から送信は一切行いません。FPV 映像の
 受信・運用には国によってアマチュア無線免許や無線局登録が必要です

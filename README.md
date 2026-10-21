@@ -110,7 +110,8 @@ cmake --build build -j
 
 ### Keys / on-screen display
 
-- `q` / ESC quit, `a` gain auto/fast/manual, `l`/`L` LNA, `g`/`G` VGA,
+- `q` / ESC quit, `a` next channel (E2→E1→F1→F3→F4→F5), `A` (shift) gain auto/fast/manual,
+  `l`/`L` LNA, `g`/`G` VGA,
   `b` RF amp, `c` color/gray, `o` OSD on/off, `s` screenshot, `h` help
 - `←`/`→` tune ±50 kHz, `↑`/`↓` ±1 MHz, `r` CRT emulation,
   `v` IQ record start/stop (10 MSPS ≈ 20 MB/s — keep clips short)
@@ -186,9 +187,20 @@ ctest --test-dir build -C Release
 
 ## License / disclaimer
 
-MIT License — see [LICENSE](LICENSE). Based on
-[famicom-rf-hackrf-decoder](https://github.com/GOROman/famicom-rf-hackrf-decoder)
-by GOROman (MIT).
+GPL-3.0-only — see [LICENSE](LICENSE).
+
+- Based on [famicom-rf-hackrf-decoder](https://github.com/GOROman/famicom-rf-hackrf-decoder)
+  by GOROman. That code is MIT-licensed; its copyright and permission notice
+  are kept in [LICENSES/MIT-famicom-rf-hackrf-decoder.txt](LICENSES/MIT-famicom-rf-hackrf-decoder.txt)
+  and still apply to the parts taken from it.
+- The experimental fast gain control (`--gain fast`, `src/dsp/gain_ctl.hpp`)
+  and the C5VRX receive-chain emulation (`--c5`) adapt the Direct Gain
+  V3–V5 gain control and receive-chain design of
+  [C5VRX](https://github.com/Twotoz/C5VRX) by Twotoz and the C5VRX
+  contributors (GPL-3.0-only). Visit the
+  [official C5VRX website](https://twotoz.github.io/C5VRX/) for the original
+  project and its Discord invite. This is not an official C5VRX release.
+- `third_party/SDL2` keeps its own license (zlib, `third_party/SDL2/LICENSE.txt`).
 
 Receive-only tool. It never transmits with the HackRF One. Receiving FPV
 video may require an amateur radio license and/or VTX registration in

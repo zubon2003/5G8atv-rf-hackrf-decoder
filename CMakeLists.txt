@@ -82,3 +82,7 @@ target_link_libraries(analyze_rec PRIVATE fpv_dsp)
 add_executable(test_gain_ctl tests/test_gain_ctl.cpp)
 target_link_libraries(test_gain_ctl PRIVATE fpv_dsp)
 add_test(NAME gain_ctl COMMAND test_gain_ctl)
+
+add_executable(test_c5_emu tests/test_c5_emu.cpp)
+target_link_libraries(test_c5_emu PRIVATE fpv_dsp)
+add_test(NAME c5_emu COMMAND test_c5_emu)

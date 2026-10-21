@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "dsp/c5_emu.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
 #include "dsp/fm_detector.hpp"
@@ -29,6 +30,8 @@
 using namespace famidec;
 
 namespace {
+
+C5EmuStats g_c5_stats;  // --c5 lane state, written by the DSP thread
 
 const char* gain_mode_name(Config::GainMode m) {
     switch (m) {
@@ -72,13 +75,23 @@ void usage() {
         "  --dump-frames PREFIX  write decoded frames as PPM (headless)\n"
         "  --frames N            number of frames for --dump-frames (default 30)\n"
         "  --spectrum            print PSD and exit (no video)\n"
-        "\nkeys: q/ESC quit, a gain auto/fast/manual, l/L LNA, g/G VGA, b RF amp,\n"
+        "  --c5                  emulate the C5VRX-5 chain: digital Direct Gain V5\n"
+        "                        + 4-bit ultrafine IQ before demodulation\n"
+        "  --c5-maxgain DB       pin the C5 listening gain re 8-bit full scale\n"
+        "                        (default: auto, noise read as on a C5)\n"
+        "  --c5-nofilter         C5 mode without the channel LPF (as U85Q)\n"
+        "  --c5-wrap             C5 mode + experimental lane-wrap detection\n"
+        "                        (--c5 holds the HackRF at LNA40 VGA10 unless\n"
+        "                        --gain/--lna/--vga is given)\n"
+        "\nkeys: q/ESC quit, a next channel (E2 E1 F1 F3 F4 F5),\n"
+        "      A (shift) gain auto/fast/manual, l/L LNA, g/G VGA, b RF amp,\n"
         "      c color, o OSD on/off, s screenshot, h help,\n"
         "      arrows tune (50 kHz / 1 MHz), r CRT mode, v record IQ,\n"
         "      f freerun raster, space resync\n");
 }
 
 bool parse_args(int argc, char** argv, Config* cfg) {
+    bool gain_given = false;  // --gain/--lna/--vga on the command line
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&](const char* name) -> const char* {
@@ -105,13 +118,18 @@ bool parse_args(int argc, char** argv, Config* cfg) {
         } else if (a == "--file") { cfg->file_path = next("--file"); cfg->input = Config::Input::File; }
         else if (a == "--loop") cfg->loop = true;
         else if (a == "--rate") cfg->sample_rate = std::atof(next("--rate"));
+        else if (a == "--c5") cfg->c5_emu = true;
+        else if (a == "--c5-maxgain") { cfg->c5_emu = true; cfg->c5_max_gain_auto = false; cfg->c5_max_gain_db = std::atof(next("--c5-maxgain")); }
+        else if (a == "--c5-nofilter") { cfg->c5_emu = true; cfg->c5_nofilter = true; }
+        else if (a == "--c5-wrap") { cfg->c5_emu = true; cfg->c5_wrap_detect = true; }
         else if (a == "--offset") cfg->offset_hz = std::atof(next("--offset"));
-        else if (a == "--lna") { cfg->lna_gain = std::atoi(next("--lna")); cfg->gain_mode = Config::GainMode::Manual; }
-        else if (a == "--vga") { cfg->vga_gain = std::atoi(next("--vga")); cfg->gain_mode = Config::GainMode::Manual; }
+        else if (a == "--lna") { cfg->lna_gain = std::atoi(next("--lna")); cfg->gain_mode = Config::GainMode::Manual; gain_given = true; }
+        else if (a == "--vga") { cfg->vga_gain = std::atoi(next("--vga")); cfg->gain_mode = Config::GainMode::Manual; gain_given = true; }
         else if (a == "--amp") cfg->amp = true;
         else if (a == "--no-amp") cfg->amp = false;
         else if (a == "--gain") {
             std::string v = next("--gain");
+            gain_given = true;
             if (v == "auto") cfg->gain_mode = Config::GainMode::Auto;
             else if (v == "fast" || v == "c5") cfg->gain_mode = Config::GainMode::Fast;
             else if (v == "manual") cfg->gain_mode = Config::GainMode::Manual;
@@ -141,6 +159,15 @@ bool parse_args(int argc, char** argv, Config* cfg) {
         return false;
     }
     if (cfg->headless && cfg->dump_frame_count <= 0) cfg->dump_frame_count = 30;
+    // --c5: the emulated Direct Gain owns the gain. A HackRF AGC under it
+    // steps VGA 2..12 dB every 0.5 s, which reads as violent fades. Hold the
+    // analog gain fixed (with headroom) unless the user chose one.
+    if (cfg->c5_emu && !gain_given) {
+        cfg->gain_mode = Config::GainMode::Manual;
+        cfg->vga_gain = cfg->c5_hackrf_vga;
+        std::printf("--c5: HackRF gain fixed at LNA%d VGA%d%s (override with --lna/--vga/--gain)\n",
+                    cfg->lna_gain, cfg->vga_gain, cfg->amp ? " +amp" : "");
+    }
     return true;
 }
 
@@ -255,6 +282,16 @@ void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
     std::vector<float> comp(kBlockBytes / 2);
 
     DcBlocker dcb;
+    // --c5: the C5VRX-5 lane (digital Direct Gain V5 + 4-bit ultrafine IQ)
+    // between the DC blocker and the channel filter; one status line a
+    // second of samples.
+    std::unique_ptr<C5Emulator> c5;
+    if (cfg.c5_emu)
+        c5 = std::make_unique<C5Emulator>(cfg.sample_rate, cfg.c5_max_gain_db,
+                                          cfg.c5_min_gain_db, &g_c5_stats,
+                                          cfg.c5_wrap_detect, cfg.c5_max_gain_auto);
+    uint64_t c5_samples = 0, c5_next_print = static_cast<uint64_t>(cfg.sample_rate);
+    uint32_t c5_prev_writes = 0, c5_prev_bursts = 0, c5_prev_over = 0, c5_prev_wraps = 0;
     // The NCO costs a sin+cos per sample — only run it when actually
     // offset-tuned (the FPV default is offset 0, carrier at DC).
     const bool mix = cfg.offset_hz != 0.0;
@@ -290,7 +327,28 @@ void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
         }
         if (mix)
             for (size_t i = 0; i < ns; ++i) iq[i] *= mixer.next();
-        chan_lpf.process(iq.data(), iq.data(), ns);
+        if (c5) {
+            c5->process(iq.data(), ns);
+            c5_samples += ns;
+            if (c5_samples >= c5_next_print) {
+                c5_next_print += static_cast<uint64_t>(cfg.sample_rate);
+                const C5EmuStats& s = g_c5_stats;
+                uint32_t w = s.writes.load(), b = s.bursts.load(), o = s.overloads.load(),
+                         wr = s.wraps.load();
+                std::printf("C5: gain %+5.1f dB (listen %+5.1f) p50 %2d p95 %2d coh %2d clip %3d origin %3d"
+                            " | writes +%u (sev %u mod %u) overload +%u wrap +%u burst +%u damp %u\n",
+                            s.gain_db.load(), s.listen_db.load(), s.p50.load(), s.p95.load(), s.coherence.load(),
+                            s.clip_pm.load(), s.origin_pm.load(), w - c5_prev_writes,
+                            s.severe.load(), s.moderate.load(), o - c5_prev_over,
+                            wr - c5_prev_wraps, b - c5_prev_bursts, s.damp_events.load());
+                std::fflush(stdout);
+                c5_prev_writes = w;
+                c5_prev_bursts = b;
+                c5_prev_over = o;
+                c5_prev_wraps = wr;
+            }
+        }
+        if (!(c5 && cfg.c5_nofilter)) chan_lpf.process(iq.data(), iq.data(), ns);
         fm_det.process(iq.data(), comp.data(), ns);
         if (use_video_lpf) video_lpf.process(comp.data(), comp.data(), ns);
         float sum = 0.0f;
@@ -469,7 +527,7 @@ int main(int argc, char** argv) {
                 }
             }
             if (act == KeyAction::ToggleGainMode) {
-                // a: AUTO -> FAST -> MANUAL -> AUTO
+                // A (shift): AUTO -> FAST -> MANUAL -> AUTO
                 mcfg.gain_mode =
                     mcfg.gain_mode == Config::GainMode::Auto   ? Config::GainMode::Fast
                     : mcfg.gain_mode == Config::GainMode::Fast ? Config::GainMode::Manual
@@ -515,6 +573,32 @@ int main(int argc, char** argv) {
                 mcfg.video_carrier_hz += tune;
                 hackrf->set_center_freq(mcfg.center_hz());
                 channel = fpv_nearest_channel(mcfg.video_carrier_hz);
+            }
+            // a: jump to the next channel of the local set. From an
+            // off-list frequency, go to the next one above it.
+            if (act == KeyAction::NextChannel && hackrf) {
+                static const char* kCycle[] = {"E2", "E1", "F1", "F3", "F4", "F5"};
+                const int n = static_cast<int>(sizeof(kCycle) / sizeof(kCycle[0]));
+                int next = -1;
+                for (int i = 0; i < n; ++i)
+                    if (channel == kCycle[i]) next = (i + 1) % n;
+                for (int i = 0; next < 0 && i < n; ++i) {
+                    double hz;
+                    if (fpv_channel_freq(kCycle[i], &hz) && hz > mcfg.video_carrier_hz)
+                        next = i;
+                }
+                if (next < 0) next = 0;
+                double hz;
+                fpv_channel_freq(kCycle[next], &hz);
+                mcfg.video_carrier_hz = hz;
+                hackrf->set_center_freq(mcfg.center_hz());
+                channel = fpv_nearest_channel(mcfg.video_carrier_hz);
+                // New VTX: drop the old lock and AFC history.
+                dec.request_reset();
+                afc_meas.clear();
+                lock_changed = std::chrono::steady_clock::now();
+                std::printf("channel: %s (%.0f MHz)\n", channel.c_str(), hz / 1e6);
+                std::fflush(stdout);
             }
             if (act == KeyAction::ToggleColor)
                 mcfg.mode = (mcfg.mode == Config::Mode::Color)

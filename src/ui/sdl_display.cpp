@@ -226,7 +226,7 @@ KeyAction SdlDisplay::poll() {
                 case SDLK_v:
                     return KeyAction::ToggleRecord;
                 case SDLK_a:
-                    return KeyAction::ToggleGainMode;
+                    return shift ? KeyAction::ToggleGainMode : KeyAction::NextChannel;
                 case SDLK_b:
                     return KeyAction::ToggleAmp;
                 case SDLK_o:
@@ -313,7 +313,8 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
         static const char* kHelp[] = {
             "KEYS",
             "Q ESC   QUIT",
-            "A       GAIN AUTO - FAST - MANUAL",
+            "A       CHANNEL E2 E1 F1 F3 F4 F5",
+            "SHIFT A GAIN AUTO - FAST - MANUAL",
             "L       LNA UP   (MANUAL)",
             "SHIFT L LNA DOWN (MANUAL)",
             "G       VGA UP   (MANUAL)",

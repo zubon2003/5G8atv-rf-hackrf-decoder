@@ -25,6 +25,25 @@ struct Config {
     enum class GainMode { Manual, Auto, Fast };
     GainMode gain_mode = GainMode::Auto;
 
+    // C5VRX receive-chain emulation (src/dsp/c5_emu.hpp): digital Direct
+    // Gain V5 + 4-bit ultrafine quantisation before the demodulator.
+    // --c5 enables; the listening (maximum) digital gain, in dB relative to
+    // the HackRF's 8-bit full scale, starts at c5_max_gain_db and follows
+    // the noise to the C5's P50 3..5 unless --c5-maxgain pins it;
+    // --c5-nofilter skips the channel LPF after the emulated lane (U85Q has
+    // none).
+    bool c5_emu = false;
+    double c5_max_gain_db = 20.0;
+    bool c5_max_gain_auto = true;
+    double c5_min_gain_db = -30.0;
+    bool c5_nofilter = false;
+    // Lane-wrap detection, opt-in (--c5-wrap): low coherence with a large
+    // envelope for >= 1 ms means codes beyond +-128 folded back; drop gain.
+    bool c5_wrap_detect = false;  // also fires on sustained Wi-Fi: test it
+    // With --c5 and no --gain/--lna/--vga, the HackRF gain is held at LNA 40
+    // and this VGA (a close VTX peaked at 30..60 of 127 with VGA 4..16).
+    int c5_hackrf_vga = 10;
+
     enum class Input { HackRF, File };
     Input input = Input::HackRF;
     std::string file_path;
